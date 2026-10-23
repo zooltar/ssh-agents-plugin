@@ -44,6 +44,20 @@ class AgentSetupTimeoutTest {
     }
 
     @Test
+    void threadIsNotInterruptedByTimerCallbackRunningAfterFinish() {
+        // a long timeout, the timer callback is run by the test instead
+        AgentSetupTimeout timeout = AgentSetupTimeout.start(60);
+        timeout.expire();
+        assertTrue(Thread.currentThread().isInterrupted());
+        assertFalse(timeout.finish());
+        assertFalse(Thread.currentThread().isInterrupted());
+
+        // a timer callback that was already running when the setup finished
+        timeout.expire();
+        assertFalse(Thread.currentThread().isInterrupted());
+    }
+
+    @Test
     void disabledTimeout() throws Exception {
         AgentSetupTimeout timeout = AgentSetupTimeout.start(0);
         Thread.sleep(TimeUnit.SECONDS.toMillis(2));

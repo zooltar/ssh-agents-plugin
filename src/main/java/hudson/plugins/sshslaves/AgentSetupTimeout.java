@@ -3,7 +3,6 @@ package hudson.plugins.sshslaves;
 import edu.umd.cs.findbugs.annotations.CheckForNull;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import jenkins.util.Timer;
 
 /**
@@ -18,8 +17,8 @@ final class AgentSetupTimeout {
 
     private enum State {
         RUNNING,
-        FINISHED,
-        TIMED_OUT
+        TIMED_OUT,
+        FINISHED
     }
 
     /**
@@ -28,12 +27,17 @@ final class AgentSetupTimeout {
      */
     private static final long INTERRUPT_INTERVAL_SECONDS = 1;
 
-    private final AtomicReference<State> state = new AtomicReference<>(State.RUNNING);
+    private final Thread thread;
+
+    // guarded by this, so that the thread is never interrupted once the setup is finished
+    private State state = State.RUNNING;
 
     @CheckForNull
     private ScheduledFuture<?> interrupter;
 
-    private AgentSetupTimeout() {}
+    private AgentSetupTimeout(Thread thread) {
+        this.thread = thread;
+    }
 
     /**
      * Starts the timeout for the current thread.
@@ -42,19 +46,21 @@ final class AgentSetupTimeout {
      * @return the timeout, to be finished by the same thread once the setup is over.
      */
     static AgentSetupTimeout start(int timeoutSeconds) {
-        AgentSetupTimeout timeout = new AgentSetupTimeout();
+        AgentSetupTimeout timeout = new AgentSetupTimeout(Thread.currentThread());
         if (timeoutSeconds > 0) {
-            Thread thread = Thread.currentThread();
             timeout.interrupter = Timer.get()
                     .scheduleWithFixedDelay(
-                            () -> timeout.expire(thread), timeoutSeconds, INTERRUPT_INTERVAL_SECONDS, TimeUnit.SECONDS);
+                            timeout::expire, timeoutSeconds, INTERRUPT_INTERVAL_SECONDS, TimeUnit.SECONDS);
         }
         return timeout;
     }
 
-    private void expire(Thread thread) {
-        state.compareAndSet(State.RUNNING, State.TIMED_OUT);
-        if (state.get() == State.TIMED_OUT) {
+    /**
+     * Called once the time is up, then periodically until the setup is finished.
+     */
+    synchronized void expire() {
+        if (state != State.FINISHED) {
+            state = State.TIMED_OUT;
             thread.interrupt();
         }
     }
@@ -69,10 +75,14 @@ final class AgentSetupTimeout {
         if (interrupter != null) {
             interrupter.cancel(false);
         }
-        if (state.compareAndSet(State.RUNNING, State.FINISHED)) {
-            return true;
+        synchronized (this) {
+            boolean inTime = state == State.RUNNING;
+            state = State.FINISHED;
+            if (!inTime) {
+                // an interruption left over would make the next interruptible operation fail, like writing the log
+                Thread.interrupted();
+            }
+            return inTime;
         }
-        Thread.interrupted();
-        return false;
     }
 }
